@@ -481,15 +481,53 @@ class App(tk.Tk):
         btn_apply_db_tpl = ttk.Button(lf, text="Apply to selected DB", command=self._apply_db_template_to_active)
         btn_apply_db_tpl.grid(row=0, column=3, sticky="e", padx=6, pady=6)
 
+
         # DB Tree
         db_frame = ttk.LabelFrame(left, text="Databases / Tables / Columns")
         db_frame.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
+        # Current values
+        current_db_frame = ttk.LabelFrame(db_frame, text="Current values")
+        current_db_frame.grid(row=0, column=0, sticky="ew", padx=6, pady=(0, 6))
+
+        # ---- Row 0: Current database name ----
+        lbl_db = ttk.Label(current_db_frame, text="Database:")
+        lbl_db.grid(row=0, column=0, sticky="w", padx=6, pady=6)
+
+        self.var_db = tk.StringVar()
+        self.ent_db = ttk.Entry(current_db_frame, textvariable=self.var_db)
+        self.ent_db.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+
+        # ---- Row 1: Current table ----
+        lbl_table = ttk.Label(current_db_frame, text="Table:")
+        lbl_table.grid(row=1, column=0, sticky="w", padx=6, pady=6)
+
+        self.var_table = tk.StringVar()
+        self.ent_table = ttk.Entry(current_db_frame, textvariable=self.var_table)
+        self.ent_table.grid(row=1, column=1, sticky="ew", padx=6, pady=6)
+
+        # ---- Row 2: Current column ----
+        lbl_column = ttk.Label(current_db_frame, text="Column:")
+        lbl_column.grid(row=2, column=0, sticky="w", padx=6, pady=6)
+
+        self.var_column = tk.StringVar()
+        self.ent_column = ttk.Entry(current_db_frame, textvariable=self.var_column)
+        self.ent_column.grid(row=2, column=1, sticky="ew", padx=6, pady=6)
+
+        # Expand column 1
+        current_db_frame.rowconfigure(0, weight=0)
+        current_db_frame.rowconfigure(1, weight=0)
+        current_db_frame.rowconfigure(2, weight=0)
+        current_db_frame.columnconfigure(0, weight=0)
+        current_db_frame.columnconfigure(1, weight=1)
+
         self.tree = ttk.Treeview(db_frame, columns=("info",), show="tree")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        db_frame.rowconfigure(0, weight=1)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+
+        db_frame.rowconfigure(0, weight=0)
+        db_frame.rowconfigure(1, weight=1)
         db_frame.columnconfigure(0, weight=1)
 
         sb = ttk.Scrollbar(db_frame, orient="vertical", command=self.tree.yview)
@@ -584,7 +622,6 @@ class App(tk.Tk):
 
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
-
 
         # Right: table of templates
         rf = ttk.LabelFrame(right, text="Templates")
@@ -699,6 +736,128 @@ class App(tk.Tk):
         return path.resolve() in {SETTINGS_DB.resolve(), TEMPLATES_DB.resolve()}
 
     def _reload_db_tree(self) -> None:
+
+        selected = []
+        all_select = self.tree.selection()
+        for  k in all_select:
+            # Collect texts going upward
+            texts = []
+            current = k
+            while current:  # climb up parents
+                texts.insert(0, self.tree.item(current, "text"))  # prepend text
+                current = self.tree.parent(current)
+            selected.append(texts)
+
+        
+        curr_open_nodes = {}
+        def collect_open( open_nodes, node="" ):
+            for child in self.tree.get_children(node):
+                vals = self.tree.item(child, "values")
+                # If expanded or it’s a column, remember it
+                if self.tree.item(child, "open") or (vals and vals[0] == "col"):
+                    #open_nodes.append(self.tree.item(child, "text"))
+                    open_nodes[self.tree.item(child, "text")] = {}
+                    collect_open(open_nodes[self.tree.item(child, "text")],child)
+        collect_open(curr_open_nodes)
+        
+        self._addition_reload_db_tree()
+
+        def restore_open(saved_dict, node=""):
+            for child in self.tree.get_children(node):
+                text = self.tree.item(child, "text")
+                if text in saved_dict:
+                    # open the node
+                    self.tree.item(child, open=True)
+                    vals = self.tree.item(child, "values")
+                    
+                    if vals and vals[0] == "table":
+                        self._populate_columns(child,vals)
+                            
+                    # if this is a DB node, make sure tables are populated
+                    if child in self.db_nodes:
+                        self._populate_tables(child)
+
+                    # recurse into children with the saved sub-dict
+                    restore_open(saved_dict[text], child)
+                # else: not in saved state → skip going deeper
+
+
+        restore_open(curr_open_nodes)
+
+        result_selection = []
+        for selectpath in selected:
+            current = ""
+            stop = False
+            for t in selectpath:
+                founded = False
+                for item_id in self.tree.get_children(current):
+                    if self.tree.item(item_id, "text") == t:
+                        current = item_id
+                        founded = True
+                if not founded:
+                    stop = True
+                    break
+            
+            if current != "" :
+                result_selection.append(current)
+        self.tree.selection_set(result_selection)    
+
+    def _populate_columns(self,node,vals):
+        # It’s a table node → force populate its columns
+        parent_db_node = self.tree.parent(node)
+        if parent_db_node in self.db_nodes:
+            db_path = self.db_nodes[parent_db_node]
+            table_name = vals[1]
+            # remove placeholder if present
+            for gc in self.tree.get_children(node):
+                if self.tree.item(gc, "values")[0] == "placeholder":
+                    self.tree.delete(gc)
+            # add real columns
+            con = safe_connect(db_path)
+            try:
+                cur = con.execute(f'PRAGMA table_info({table_name})')
+                for cid, name, ctype, notnull, dflt, pk in cur.fetchall():
+                    self.tree.insert(
+                        node, "end",
+                        text=f"{name} : {ctype if ctype else 'UNKNOWN'}",
+                        values=("col", name)
+                    )
+            finally:
+                con.close()
+
+                        
+    def _1_reload_db_tree(self) -> None:
+        # --- collect open paths ---
+        open_paths = set()
+        def collect(node="", prefix=""):
+            for child in self.tree.get_children(node):
+                text = self.tree.item(child, "text")
+                path = prefix + "/" + text if prefix else text
+                if self.tree.item(child, "open"):
+                    open_paths.add(path)
+                collect(child, path)
+        collect()
+
+        # --- rebuild ---
+        self._addition_reload_db_tree()
+
+        # --- restore ---
+        def restore(node="", prefix=""):
+            for child in self.tree.get_children(node):
+                text = self.tree.item(child, "text")
+                path = prefix + "/" + text if prefix else text
+                if path in open_paths:
+                    self.tree.item(child, open=True)
+                    # if it’s a DB node, populate its tables now
+                    if child in self.db_nodes:
+                        self._populate_tables(child)
+                        # recurse into those tables
+                        restore(child, path)
+                else:
+                    restore(child, path)
+        restore()
+    
+    def _addition_reload_db_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self.db_nodes.clear()
 
@@ -710,7 +869,7 @@ class App(tk.Tk):
                 node = self.tree.insert(root_id, "end", text=p.name, values=("db",))
                 self.db_nodes[node] = p
                 # lazy load tables upon open
-                self.tree.insert(node, "end", text="Loading...", values=("placeholder",))
+                self.tree.insert(node, "end", text="Loading...", values=("placeholder",))                
 
     def _on_tree_open(self, _event=None) -> None:
         sel = self.tree.focus()
@@ -721,9 +880,28 @@ class App(tk.Tk):
             self._populate_tables(sel)
 
     def _on_tree_select(self, _event=None) -> None:
+
+        current_items = []
+        current_items.append(self.var_db)
+        current_items.append(self.var_table)
+        current_items.append(self.var_column)
+        for i in current_items:
+            i.set("")
+            
         sel = self.tree.focus()
         if not sel:
             return
+
+        texts = []
+        current = sel
+        while current:  # climb up parents
+            texts.insert(0, self.tree.item(current, "text"))  # prepend text
+            current = self.tree.parent(current)
+        #level = len(texts) - 1
+
+        for j in range(1,len(texts)):
+            current_items[j-1].set(texts[j])
+
         if sel in self.db_nodes:
             self._set_active_db(self.db_nodes[sel])
 
@@ -748,7 +926,6 @@ class App(tk.Tk):
             messagebox.showerror("Error", f"Failed to list tables for {db_path.name}:\n{e}", parent=self)
         finally:
             con.close()
-
 
     def _on_open_maybe_columns(self, _event=None) -> None:
         item = self.tree.focus()
@@ -1182,7 +1359,6 @@ def main():
     app = App()
     # High-level grid weights are configured; ttk theme is default
     app.mainloop()
-
 
 if __name__ == "__main__":
     main()
