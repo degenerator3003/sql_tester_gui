@@ -555,17 +555,6 @@ class App(tk.Tk):
 
     def _build_tab_sql_templates(self, parent: ttk.Frame) -> None:
 
-
-##        root_pane = ttk.Panedwindow(parent, orient=tk.HORIZONTAL)
-##        root_pane.grid(row=0, column=0, sticky="nsew")
-##        parent.rowconfigure(0, weight=1)
-##        parent.columnconfigure(0, weight=1)
-##
-##        # Left side (templates + DB tree)
-##        left = ttk.Frame(root_pane)
-##        root_pane.add(left, weight=1)
-
-        
         pane = ttk.Panedwindow(parent, orient=tk.HORIZONTAL)
         pane.grid(row=0, column=0, sticky="nsew")
         parent.rowconfigure(0, weight=1)
@@ -805,38 +794,6 @@ class App(tk.Tk):
                         )
                 finally:
                     con.close()
-
-##    def _on_open_maybe_columns(self, _event=None) -> None:
-##        sel = self.tree.focus()
-##        if not sel:
-##            return
-##        parent = self.tree.parent(sel)
-##        if not parent:
-##            return
-##        # parent is a table node if it has a db ancestor
-##        db_ancestor = parent
-##        while db_ancestor and db_ancestor not in self.db_nodes:
-##            db_ancestor = self.tree.parent(db_ancestor)
-##        if not db_ancestor:
-##            return
-##        db_path = self.db_nodes[db_ancestor]
-##        vals = self.tree.item(sel, "values")
-##        if vals and vals[0] == "placeholder":
-##            # sel is the placeholder under table node; load columns under parent (table node)
-##            table_node = self.tree.parent(sel)
-##            tvals = self.tree.item(table_node, "values")
-##            if tvals and tvals[0] == "table":
-##                table_name = tvals[1]
-##                # remove placeholder
-##                self.tree.delete(sel)
-##                # load columns
-##                con = safe_connect(db_path)
-##                try:
-##                    cur = con.execute(f"PRAGMA table_info({table_name})")
-##                    for cid, name, ctype, notnull, dflt, pk in cur.fetchall():
-##                        self.tree.insert(table_node, "end", text=f"{name} : {ctype or 'UNKNOWN'}", values=("col", name))
-##                finally:
-##                    con.close()
 
     def _set_active_db(self, path: Path) -> None:
         if self._is_protected(path):
