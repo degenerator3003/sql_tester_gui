@@ -48,6 +48,7 @@ Author’s notes
 
 from __future__ import annotations
 
+import re
 import os
 import sys
 import sqlite3
@@ -58,6 +59,8 @@ from typing import List, Optional, Tuple, Dict
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter import scrolledtext
+
+import formatter
 
 APP_TITLE = "SQLite GUI Tester (Pure Python)"
 APP_DIR = Path(__file__).resolve().parent
@@ -389,6 +392,7 @@ class TemplatesStore:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+
         self.title(APP_TITLE)
         self.geometry("1200x700")
         self.minsize(900, 520)
@@ -540,6 +544,7 @@ class App(tk.Tk):
         # Right side (query template + editor + results)
         right = ttk.Frame(root_pane)
         root_pane.add(right, weight=3)
+        right.rowconfigure(1, weight=1)
         right.rowconfigure(2, weight=1)
         right.columnconfigure(0, weight=1)
 
@@ -556,15 +561,24 @@ class App(tk.Tk):
         # Query editor + buttons
         editor_frame = ttk.LabelFrame(right, text="SQL")
         editor_frame.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+
+        # bottom row for buttons
         editor_frame.rowconfigure(0, weight=1)
-        editor_frame.columnconfigure(0, weight=1)
+        editor_frame.rowconfigure(1, weight=0)
+        # columns: [0][1]  [2=spacer]  [3][4]
+        editor_frame.columnconfigure(0, weight=0)
+        editor_frame.columnconfigure(1, weight=0)
+        editor_frame.columnconfigure(2, weight=1)   # <— spacer grows
+        editor_frame.columnconfigure(3, weight=0)
+        editor_frame.columnconfigure(4, weight=0)
 
         self.txt_sql = scrolledtext.ScrolledText(editor_frame, wrap="none", height=10)
-        self.txt_sql.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=6, pady=6)
+        self.txt_sql.grid(row=0, column=0, columnspan=4, sticky="nsew", padx=6, pady=6)
 
         ttk.Button(editor_frame, text="Save", command=self._save_sql).grid(row=1, column=0, sticky="w", padx=6, pady=6)
         ttk.Button(editor_frame, text="Open", command=self._open_sql).grid(row=1, column=1, sticky="w", padx=6, pady=6)
-        ttk.Button(editor_frame, text="Run", command=self._run_sql).grid(row=1, column=2, sticky="e", padx=6, pady=6)
+        ttk.Button(editor_frame, text="Format", command=self._format_txt_sql).grid(row=1, column=2, sticky="e", padx=6, pady=6)
+        ttk.Button(editor_frame, text="Run", command=self._run_sql).grid(row=1, column=3, sticky="e", padx=6, pady=6)
 
         # Results area
         res_frame = ttk.LabelFrame(right, text="Result")
@@ -824,19 +838,6 @@ class App(tk.Tk):
                     )
             finally:
                 con.close()
-
-                        
-    def _1_reload_db_tree(self) -> None:
-        # --- collect open paths ---
-        open_paths = set()
-        def collect(node="", prefix=""):
-            for child in self.tree.get_children(node):
-                text = self.tree.item(child, "text")
-                path = prefix + "/" + text if prefix else text
-                if self.tree.item(child, "open"):
-                    open_paths.add(path)
-                collect(child, path)
-        collect()
 
         # --- rebuild ---
         self._addition_reload_db_tree()
@@ -1132,6 +1133,16 @@ class App(tk.Tk):
         self.txt_sql.insert("1.0", text)
         self.status.set(f"Loaded {path}")
 
+    def _format_txt_sql(self) -> None:
+        previous_sql_text = self.txt_sql.get("1.0", "end")
+        self.txt_sql.delete("1.0", "end")
+        fsql = formatter.SQLFormatter(previous_sql_text)
+        formatted, errors = fsql.format_and_check()
+        #print("errors: " + str(errors))
+        #print("formatted: " + str(formatted))
+        highlight_sql(self.txt_sql, formatted)
+        #self.txt_sql.insert("1.0", formatted)
+
     # ---------- Result presentation ---------- #
 
     def _clear_table(self) -> None:
@@ -1353,6 +1364,125 @@ class App(tk.Tk):
             messagebox.showerror("Import failed", str(e), parent=self)
 
 
+############################################################
+
+
+# ---------------- SQL syntax highlighting ---------------- #
+
+def setup_sql_tags(text_widget):
+    """Configure tags for SQL syntax highlighting."""
+    text_widget.tag_configure("keyword", foreground="darkred", font=("TkDefaultFont", 10, "bold"))
+    text_widget.tag_configure("string", foreground="darkgreen")
+    text_widget.tag_configure("comment", foreground="gray", font=("TkDefaultFont", 10, "italic"))
+    text_widget.tag_configure("number", foreground="blue")
+    text_widget.tag_configure("ident", foreground="black")
+    text_widget.tag_configure("op", foreground="purple")
+
+
+def highlight_sql(text_widget, sql_text: str):
+
+    """
+    Highlight SQL text in a Tkinter Text/ScrolledText widget.
+    It assumes the SQLFormatter has .tokenize() method.
+    """
+    # remove existing text + tags
+    text_widget.delete("1.0", "end")
+    for tag in text_widget.tag_names():
+        text_widget.tag_remove(tag, "1.0", "end")
+
+    # insert plain text
+    text_widget.insert("1.0", sql_text)
+
+    # apply tags
+    tokens = highlight_sql_tokenize(sql_text)
+    setup_sql_tags(text_widget)
+        
+    pos = "1.0"
+    for typ, val in tokens:
+        length = len(val)
+        end = text_widget.index(f"{pos}+{length}c")
+        if typ in text_widget.tag_names():
+            text_widget.tag_add(typ, pos, end)
+        pos = end
+
+def highlight_sql_tokenize(s: str):
+
+    _space = r"[ \t\r\n\f]+"
+    _line_comment = r"--[^\n]*"
+    _block_comment = r"/\*.*?\*/"
+    _sq_string = r"'(?:''|[^'])*'"
+    _dq_string = r'"(?:[""]|[^"])*"'
+    _bt_string = r"`(?:``|[^`])*`"
+    _param = r"(?:\?|:[A-Za-z_]\w*|@[A-Za-z_]\w*|\$[A-Za-z_]\w*)"
+    _number = r"(?:\d+(?:\.\d+)?|\.\d+)"
+    _ident = r"[A-Za-z_][A-Za-z0-9_$]*"
+    _op = r"(?:<>|!=|<=|>=|\|\||[=<>+\-*/%])"
+    _punct = r"[(),.;]"
+
+    master = re.compile(
+        "|".join([
+            f"(?P<ws>{_space})",
+            f"(?P<lc>{_line_comment})",
+            f"(?P<bc>{_block_comment})",
+            f"(?P<sq>{_sq_string})",
+            f"(?P<dq>{_dq_string})",
+            f"(?P<bt>{_bt_string})",
+            f"(?P<param>{_param})",
+            f"(?P<number>{_number})",
+            f"(?P<op>{_op})",
+            f"(?P<punct>{_punct})",
+            f"(?P<ident>{_ident})",
+        ]),
+        re.DOTALL
+    )
+
+    # ---------- keyword & clause catalogs ----------
+    KEYWORDS = {
+        "ABORT","ABS","ABSOLUTE","ACCESS","ACTION","ADD","AFTER","ALL","ALTER","ALWAYS","ANALYZE","AND","AS","ASC",
+        "ATTACH","AUTOINCREMENT","BEFORE","BEGIN","BETWEEN","BINARY","BLOB","BY","CASCADE","CASE","CAST","CHECK",
+        "COLLATE","COLUMN","COMMIT","CONFLICT","CONSTRAINT","CREATE","CROSS","CURRENT","CURRENT_DATE",
+        "CURRENT_TIME","CURRENT_TIMESTAMP","DATABASE","DEFAULT","DEFERRABLE","DEFERRED","DELETE","DESC","DETACH",
+        "DISTINCT","DO","DROP","EACH","ELSE","END","ESCAPE","EXCEPT","EXCLUDE","EXCLUSIVE","EXISTS","EXPLAIN",
+        "FAIL","FILTER","FIRST","FOLLOWING","FOR","FOREIGN","FROM","FULL","GENERATED","GLOB","GROUP","HAVING",
+        "IF","IGNORE","IMMEDIATE","IN","INDEX","INDEXED","INITIALLY","INNER","INSERT","INSTEAD","INTERSECT",
+        "INTO","IS","ISNULL","JOIN","KEY","LAST","LEFT","LIKE","LIMIT","MATCH","MATERIALIZED","NATURAL","NO",
+        "NOT","NOTHING","NOTNULL","NULL","NULLS","OF","OFFSET","ON","OR","ORDER","OTHERS","OUTER","OVER","PARTITION",
+        "PLAN","PRAGMA","PRECEDING","PRIMARY","QUERY","RAISE","RANGE","RECURSIVE","REFERENCES","REGEXP","REINDEX",
+        "RELEASE","RENAME","REPLACE","RESTRICT","RETURNING","RIGHT","ROLLBACK","ROW","ROWS","SAVEPOINT","SELECT",
+        "SET","TABLE","TEMP","TEMPORARY","THEN","TIES","TO","TRANSACTION","TRIGGER","UNBOUNDED","UNION","UNIQUE",
+        "UPDATE","USING","VACUUM","VALUES","VIEW","VIRTUAL","WHEN","WHERE","WINDOW","WITH","WITHOUT","QUALIFY"
+    }
+
+    pos, out = 0, []
+    for m in master.finditer(s):
+        if m.start() != pos:
+            raw = s[pos:m.start()]
+            out.append(("ident", raw))
+        pos = m.end()
+        kind, val = m.lastgroup, m.group()
+        if kind == "ws":
+            out.append(("ws", val))
+        elif kind in ("lc", "bc"):
+            out.append(("comment", val))
+        elif kind in ("sq","dq","bt"):
+            out.append(("string", val))
+        elif kind == "number":
+            out.append(("number", val))
+        elif kind == "param":
+            out.append(("param", val))
+        elif kind == "op":
+            out.append(("op", val))
+        elif kind == "punct":
+            out.append(("punct", val))
+        elif kind == "ident":
+            u = val.upper()
+            if u in KEYWORDS:
+                out.append(("keyword", u))
+            else:
+                out.append(("ident", val))
+    if pos < len(s):
+        out.append(("ident", s[pos:]))
+    return out
 # ------------------------ main ------------------------ #
 
 def main():
